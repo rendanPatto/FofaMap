@@ -6,6 +6,8 @@ userinfo:
   key: "your_fofa_api_key"
   # [New] DeepSeek 或其他模型的 API Key
   deepseek_api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+  # Shodan API Key（可留空，也可通过环境变量 SHODAN_API_KEY 配置）
+  shodan_api_key: "your_shodan_api_key"
 
   # --- [畅想1: 多模型支持新增字段] ---
   # 接口类型: deepseek / openai / ollama / lmstudio / 第三方兼容 OpenAI 的 Completion API接口
@@ -27,6 +29,13 @@ search:
   full: false
   start_page: 1
   end_page: 2
+
+# ====== Shodan 设置 (Shodan Settings) ======
+shodan:
+  # Shodan 搜索默认返回数量，手动模式可通过 --shodan-limit 覆盖
+  default_limit: 100
+  # Shodan API 请求超时时间（秒）
+  timeout: 30
 
 # ====== 性能与输出 (System) ======
 system:

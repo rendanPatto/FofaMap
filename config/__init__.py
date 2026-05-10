@@ -8,6 +8,7 @@ class UserInfo(BaseModel):
     email: str
     key: str
     deepseek_api_key: str = ""
+    shodan_api_key: str = ""
     # --- [畅想1: 新增映射字段] ---
     # 增加对 base_url 和 model 的读取支持，否则 Pydantic 会忽略它们
     base_url: str = "https://api.deepseek.com/v1"
@@ -35,11 +36,17 @@ class SystemConfig(BaseModel):
     output_dir: str = "results"
 
 
+class ShodanConfig(BaseModel):
+    default_limit: int = 100
+    timeout: int = 30
+
+
 class Config(BaseModel):
     userinfo: UserInfo
     search: SearchConfig
     fast_check: FastCheckConfig = Field(default_factory=FastCheckConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
+    shodan: ShodanConfig = Field(default_factory=ShodanConfig)
 
 
 # --- 加载逻辑 ---

@@ -62,7 +62,8 @@ class ResultPrinter:
         AI_WHITELIST = [
             "HOST", "IP", "PORT", "PROTOCOL",
             "TITLE", "SERVER", "HTTP STATUS",
-            "COUNTRY_NAME", "CNAME", "URL", "DOMAIN"
+            "COUNTRY_NAME", "COUNTRY", "CITY", "ORG", "PRODUCT",
+            "VERSION", "OS", "ENGINE", "CNAME", "URL", "DOMAIN"
         ]
 
         for idx, h in enumerate(raw_headers):

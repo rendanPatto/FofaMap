@@ -46,6 +46,7 @@ if project_root not in sys.path:
 try:
     from mcp.server.fastmcp import FastMCP
     from core.client import FofaClient
+    from core.shodan_handler import ShodanHandler
     from core.ai import DeepSeekHandler
     from utils.helpers import IconHashCalculator, FastChecker
     from config import settings
@@ -218,6 +219,56 @@ async def get_host_aggregation(host: str):
 
 
 # ==============================================================================
+# MCP 工具 2.1：Shodan 资产搜索
+# ==============================================================================
+
+@mcp.tool()
+async def shodan_search_assets(query: str, limit: int = 100, display_rows: int = 25):
+    """
+    [2.1 Shodan资产检索] 执行 Shodan 查询并返回 Markdown 表格。
+
+    Args:
+        query: Shodan 查询语法，例如 `product:nginx country:US`。
+        limit: 返回数量上限，默认 100。
+        display_rows: Markdown 表格最多展示行数，默认 25。
+    """
+    handler = ShodanHandler(enable_ai=False)
+    try:
+        raw_results = await handler.client.search(query, limit=limit)
+    except Exception as e:
+        return f"❌ Shodan 请求异常: {str(e)}"
+
+    rows = handler.normalize_records(raw_results)
+    if not rows:
+        return f"🔍 Shodan 未发现资产: `{query}`"
+
+    return handler.format_search_markdown(query, rows, max_rows=display_rows)
+
+
+# ==============================================================================
+# MCP 工具 2.2：Shodan Host 画像
+# ==============================================================================
+
+@mcp.tool()
+async def shodan_host_profile(ip: str):
+    """
+    [2.2 Shodan Host画像] 获取单个 IP 的 Shodan 服务画像，含端口、产品、CVE 情报摘要。
+
+    注意：返回的 CVE 摘要来自 Shodan 情报，未做本地验证。
+    """
+    handler = ShodanHandler(enable_ai=False)
+    try:
+        data = await handler.client.host_search(ip)
+    except Exception as e:
+        return f"❌ Shodan Host 查询异常: {str(e)}"
+
+    if not data:
+        return f"❌ Shodan Host 画像为空: `{ip}`"
+
+    return handler.format_host_markdown(data, ip)
+
+
+# ==============================================================================
 # MCP 工具 3：统计聚合
 # ==============================================================================
 
@@ -305,6 +356,7 @@ async def ai_security_consultant(user_intent: str):
 
     return (
         "### 🧠 AI 专家战术规划\n"
+        f"- **数据源**: `{plan.get('engine', 'fofa')}`\n"
         f"- **推荐查询语句**: `{plan.get('queries')}`\n"
         f"- **动作路由**: `{plan.get('action')}`\n"
         f"- **扫描决策**: {'✅ 建议开启' if plan.get('run_nuclei') else '❌ 不建议执行'}"

@@ -13,8 +13,10 @@ from utils.logger import logger
 from utils.printer import ResultPrinter, print_header, print_item, print_config, print_userinfo
 from utils.helpers import IconHashCalculator
 # 导入核心处理器
+from core.ai import has_shodan_intent
 from core.handler import FofaHandler
 from core.scanner import NucleiScanner
+from core.shodan_handler import ShodanHandler
 
 init(autoreset=True)
 
@@ -23,9 +25,10 @@ click.rich_click.USE_RICH_MARKUP = True
 click.rich_click.OPTION_GROUPS = {
     "fofamap.py": [
         {"name": "🔮 核心查询功能 (Core Queries)",
-         "options": ["--ai_query", "--query", "--host_query", "--icon_query", "--count_query", "--bat_query"]},
+         "options": ["--ai_query", "--query", "--host_query", "--icon_query", "--count_query", "--bat_query",
+                     "--shodan-query", "--shodan-host"]},
         {"name": "⚙️ 过滤与配置 (Filter & Config)",
-         "options": ["--query_fields", "--pages", "--key_word", "--include"]},
+         "options": ["--query_fields", "--pages", "--key_word", "--include", "--shodan-limit"]},
         {"name": "🚀 扫描与输出 (Scan & Output)",
          "options": ["--batch", "--nuclei", "--update", "--outfile", "--outdir", "--export-format"]},
     ]
@@ -64,6 +67,8 @@ def init_config():
     key = str(questionary.password("FOFA API Key:", default=current.get('userinfo', {}).get('key', '')).ask())
     ds_key = str(questionary.password("DeepSeek API Key (AI 模式必需):",
                                       default=current.get('userinfo', {}).get('deepseek_api_key', '')).ask())
+    shodan_key = str(questionary.password("Shodan API Key (可选，使用 Shodan 时必需):",
+                                          default=current.get('userinfo', {}).get('shodan_api_key', '')).ask())
 
     # === [新增] 2. AI 高级配置 (补全逻辑) ===
     api_type = questionary.select(
@@ -123,12 +128,21 @@ def init_config():
         "默认导出目录 (Output Directory):",
         default=current.get('system', {}).get('output_dir', 'results')
     ).ask()
+    shodan_limit = int(
+        questionary.text("Shodan 默认返回数量 (Default Limit):",
+                         default=str(current.get('shodan', {}).get('default_limit', 100)),
+                         validate=lambda t: t.isdigit()).ask())
+    shodan_timeout = int(
+        questionary.text("Shodan API 超时时间 (秒):",
+                         default=str(current.get('shodan', {}).get('timeout', 30)),
+                         validate=lambda t: t.isdigit()).ask())
 
     new_config = {
         'userinfo': {
             'email': email,
             'key': key,
             'deepseek_api_key': ds_key,
+            'shodan_api_key': shodan_key,
             # [新增] 写入配置
             'api_type': api_type,
             'base_url': base_url,
@@ -148,6 +162,10 @@ def init_config():
             'concurrency': concurrency,
             'export_format': export_format,
             'output_dir': output_dir or 'results'
+        },
+        'shodan': {
+            'default_limit': shodan_limit,
+            'timeout': shodan_timeout
         }
     }
 
@@ -217,6 +235,9 @@ def run_interactive_wizard():
 @click.option("-cq", "--count_query", help="📊 [统计聚合] 查询全球资产分布统计 (如 'app=\"redis\" && country=\"US\"')")
 @click.option("-ico", "--icon_query", help="🖼️ [图标查询] 输入网站 URL ，查询全网相似网站图标资产")
 @click.option("-bq", "--bat_query", help="📂 [批量模式] 指定包含查询语法的 TXT 文件路径")
+@click.option("--shodan-query", help="🔎 [Shodan] 输入 Shodan 查询语法 (如 'product:nginx country:US')")
+@click.option("--shodan-host", help="🖥️ [Shodan Host] 查询单个 IP 的 Shodan 服务画像")
+@click.option("--shodan-limit", default=0, help="📄 [Shodan数量] 指定 Shodan 搜索返回数量 (0 为使用配置文件默认值)")
 @click.option("-f", "--query_fields", help="⚙️ [字段配置] 自定义返回字段 (默认为配置文件设置)")
 @click.option("-p", "--pages", default=0, help="📄 [页数设置] 指定查询页数 (0 为使用配置文件默认值)")
 @click.option("-k", "--key_word", help="🔍 [本地筛选] 在结果中进一步搜索特定关键词")
@@ -248,7 +269,7 @@ def main(cmd, **kwargs):
         return
 
     params_set = [kwargs['query'], kwargs['host_query'], kwargs['bat_query'], kwargs['ai_query'], kwargs['icon_query'],
-                  kwargs['count_query']]
+                  kwargs['count_query'], kwargs.get('shodan_query'), kwargs.get('shodan_host')]
     if not any(params_set) and not cmd:
         wizard_args = run_interactive_wizard()
         if wizard_args:
@@ -263,23 +284,93 @@ def main(cmd, **kwargs):
 
 
 async def run_async(**kwargs):
+    ai_query_str = kwargs.get('ai_query')
+    shodan_limit = kwargs.get('shodan_limit') or getattr(settings.shodan, "default_limit", 100)
+
+    # --- Shodan 手动模式：不依赖 FOFA 登录，避免无关凭证阻塞 ---
+    if kwargs.get('shodan_host'):
+        shodan_handler = ShodanHandler()
+        target = kwargs['shodan_host'].strip().strip("'").strip('"')
+        await shodan_handler.handle_host_query(target, outdir=kwargs.get('outdir'))
+        return
+
+    if kwargs.get('shodan_query'):
+        shodan_handler = ShodanHandler()
+        query = kwargs['shodan_query'].strip().strip("'").strip('"')
+        await shodan_handler.run_search_task(
+            query=query,
+            limit=shodan_limit,
+            outfile=kwargs.get('outfile'),
+            outdir=kwargs.get('outdir'),
+            export_format=kwargs.get('export_format'),
+            ai_query=None,
+            nuclei=kwargs.get('nuclei', False),
+            scan_args=""
+        )
+        return
+
     handler = FofaHandler()
-    user_info = await handler.init_user()
-    if not user_info: return
-    print_userinfo(user_info)
+    # Shodan AI 模式不需要 FOFA 用户信息；FOFA 路径保持原有登录校验。
+    if ai_query_str and has_shodan_intent(ai_query_str):
+        user_info = {"vip_level": 0}
+    else:
+        user_info = await handler.init_user()
+        if not user_info: return
+        print_userinfo(user_info)
 
     candidate_queries = []
     final_scan_args = ""
-    ai_query_str = kwargs.get('ai_query')
 
     # --- [核心逻辑: AI 智能路由分发 (v2.0)] ---
     if ai_query_str:
         plan = await handler.ai_handler.strategic_planning(ai_query_str, user_info)
         if plan:
-            action = plan.get("action", "fofa_search")
+            if plan.get("error"):
+                logger.error(plan.get("error"))
+                return
+
+            engine = plan.get("engine", "fofa")
+            action = plan.get("action", "asset_search")
             target = plan.get("target")
             queries = plan.get("queries", [])
             fields = plan.get("fields", "")
+
+            if engine == "shodan":
+                shodan_handler = ShodanHandler()
+                if plan.get('run_nuclei'): kwargs['nuclei'] = True
+                final_scan_args = plan.get('nuclei_args', "")
+
+                if action == "host_query":
+                    if not target and queries:
+                        target = queries[0]
+                    if target:
+                        target = str(target).strip().strip("'").strip('"').strip()
+                        logger.ai(f"AI 智能体路由决策: [Shodan Host 画像] -> {target}")
+                        await shodan_handler.handle_host_query(target, user_intent=ai_query_str, outdir=kwargs.get('outdir'))
+                    else:
+                        logger.error("AI 判定为 Shodan Host 查询，但未提供目标 IP。")
+                    return
+
+                if action == "asset_search":
+                    if not queries:
+                        logger.error("AI 未生成有效的 Shodan 查询语句。")
+                        return
+                    query_str = str(queries[0]).strip()
+                    logger.ai(f"AI 智能体路由决策: [Shodan 资产搜索] -> {query_str}")
+                    await shodan_handler.run_search_task(
+                        query=query_str,
+                        limit=shodan_limit,
+                        outfile=kwargs.get('outfile'),
+                        outdir=kwargs.get('outdir'),
+                        export_format=kwargs.get('export_format'),
+                        ai_query=ai_query_str,
+                        nuclei=kwargs.get('nuclei', False),
+                        scan_args=final_scan_args
+                    )
+                    return
+
+                logger.error(f"Shodan 首版暂不支持动作: {action}")
+                return
 
             # 1. [Host 单体画像] AI 决定查看 IP 详情
             if action == "host_query":
@@ -339,7 +430,7 @@ async def run_async(**kwargs):
             # 同步 AI 的附加决策参数
             if plan.get('run_nuclei'): kwargs['nuclei'] = True
             final_scan_args = plan.get('nuclei_args', "")
-            if fields and action == "fofa_search":
+            if fields and action == "asset_search":
                 kwargs['query_fields'] = fields
 
     # --- 非 AI 模式 ---
