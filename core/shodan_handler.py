@@ -240,19 +240,60 @@ class ShodanHandler:
         logger.info(f"Shodan 导出格式: {export_format.upper()}")
         logger.info(f"Shodan 查询数量上限: {limit}")
 
-        try:
-            raw_results = await self.client.search(query, limit=limit)
-        except (ShodanConfigError, ShodanAPIError) as e:
-            logger.error(str(e))
-            return []
+        candidate_queries = [query]
+        failed_queries = []
+        has_retried = False
+        hit_query = query
+        rows: List[List[str]] = []
 
-        rows = self.normalize_records(raw_results)
+        idx = 0
+        while idx < len(candidate_queries):
+            current_query = candidate_queries[idx]
+            logger.info(f"执行 Shodan 查询 ({idx + 1}/{len(candidate_queries)}): [{current_query}]")
+
+            try:
+                raw_results = await self.client.search(current_query, limit=limit)
+            except (ShodanConfigError, ShodanAPIError) as e:
+                logger.error(str(e))
+                return []
+
+            rows = self.normalize_records(raw_results)
+            if rows:
+                hit_query = current_query
+                break
+
+            logger.warning(f"Shodan 查询无数据: {current_query}")
+            failed_queries.append(current_query)
+
+            should_reflect = (
+                bool(ai_query)
+                and not has_retried
+                and self.ai_handler is not None
+                and hasattr(self.ai_handler, "reflect_and_retry_shodan")
+            )
+            if should_reflect:
+                new_queries = await self.ai_handler.reflect_and_retry_shodan(
+                    ai_query,
+                    failed_queries,
+                    max_queries=3
+                )
+                has_retried = True
+                if new_queries:
+                    candidate_queries.extend(new_queries)
+                    logger.info(f"Shodan 自动反思已追加 {len(new_queries)} 条候选查询。")
+                else:
+                    logger.warning("Shodan 自动反思未生成可用候选查询。")
+
+            idx += 1
+
         if not rows:
-            logger.warning(f"Shodan 查询无数据: {query}")
-            logger.warning("建议确认 Shodan 查询语法，或放宽 product/country/org 等条件。")
+            if has_retried:
+                logger.warning("Shodan 自动反思后仍无数据，请检查目标是否过于冷门或进一步放宽条件。")
+            else:
+                logger.warning("建议确认 Shodan 查询语法，或放宽 product/country/org 等条件。")
             return []
 
-        print_header(f"Shodan 查询结果: {query} (共 {len(rows)} 条)")
+        print_header(f"Shodan 查询结果: {hit_query} (共 {len(rows)} 条)")
         ResultPrinter.print_fofa_data(rows, self.ASSET_FIELDS_STR, is_ai_mode=bool(ai_query))
 
         export_path = self._build_export_path(
@@ -269,7 +310,7 @@ class ShodanHandler:
 
         if ai_query and self.ai_handler and self.ai_handler.client:
             report_path = self.project_dir / f"shodan_asset_report_{self.timestamp_suffix}.md"
-            await self.ai_handler.generate_shodan_asset_report(rows, query, ai_query, str(report_path))
+            await self.ai_handler.generate_shodan_asset_report(rows, hit_query, ai_query, str(report_path))
 
         if nuclei:
             scan_targets = sorted({row[1] for row in rows if len(row) > 1 and str(row[1]).startswith(("http://", "https://"))})

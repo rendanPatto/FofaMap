@@ -26,6 +26,14 @@ def _is_shodan_filter(field: str) -> bool:
     return field in SHODAN_FILTER_FIELDS or field.startswith("ssl.") or field.startswith("http.")
 
 
+def _strip_matching_wrapper(text: str) -> str:
+    """仅移除成对包裹的引号/反引号，避免破坏 DSL 内部或尾部的合法引号。"""
+    value = str(text or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"`", "'", '"'}:
+        return value[1:-1].strip()
+    return value
+
+
 def extract_shodan_dsl(text: str) -> str:
     """从自然语言中提取用户已经写出的 Shodan DSL 片段。
 
@@ -60,7 +68,7 @@ def extract_shodan_dsl(text: str) -> str:
             cursor = token_match.end()
 
     query = " ".join(tokens) if tokens else tail
-    return query.strip("`'\" ")
+    return _strip_matching_wrapper(query)
 
 
 def looks_like_fofa_dsl(text: str) -> bool:
@@ -69,6 +77,59 @@ def looks_like_fofa_dsl(text: str) -> bool:
     if "&&" in raw or "||" in raw:
         return True
     return bool(re.search(r'\b(app|body|fid|icon_hash|cert(?:\.[\w.]+)?)\s*=', raw, re.I))
+
+
+def normalize_shodan_retry_queries(queries: list, failed_queries: list = None, max_queries: int = 3) -> list:
+    """清洗 Shodan 反思返回的候选查询。
+
+    目标：
+    - 去空、去重
+    - 过滤 FOFA 风格语法
+    - 尽量保留有效的 Shodan DSL / Shodan 搜索词
+    """
+    failed_set = set()
+    for item in failed_queries or []:
+        raw = _strip_matching_wrapper(item)
+        if raw:
+            failed_set.add(raw)
+
+    normalized = []
+    for item in queries or []:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+
+        if raw.startswith("```") and raw.endswith("```"):
+            inner = raw[3:-3].strip()
+            if "\n" in inner:
+                first_line, remainder = inner.split("\n", 1)
+                # 仅当第一行看起来像代码块语言标记时才丢弃，避免把 `product`
+                # 这类合法 Shodan 字段名误删掉。
+                if re.fullmatch(r"[\w+-]+", first_line.strip()):
+                    raw = remainder.strip()
+                else:
+                    raw = inner
+            else:
+                raw = inner
+        raw = _strip_matching_wrapper(re.split(r'[\r\n]', raw, maxsplit=1)[0].strip())
+        if not raw or looks_like_fofa_dsl(raw):
+            continue
+
+        # 若返回中混入中文解释，则尽量抽取其中的 Shodan DSL 片段；
+        # 否则直接保留原始英文查询，以支持 `nginx country:US` 这类合法写法。
+        if re.search(r'[\u4e00-\u9fff]', raw):
+            raw = extract_shodan_dsl(raw)
+            if not raw:
+                continue
+
+        if raw in failed_set or raw in normalized:
+            continue
+
+        normalized.append(raw)
+        if len(normalized) >= max_queries:
+            break
+
+    return normalized
 
 
 def normalize_ai_plan(plan: dict, user_intent: str = "") -> dict:
@@ -211,7 +272,7 @@ class DeepSeekHandler:
         - Shodan 查询语法使用 Shodan DSL，例如：`product:nginx country:US`、`org:"Google LLC" port:443`。
         - 对自然语言需求生成 Shodan DSL，不要生成 FOFA 语法。
         - 如果用户明确要求扫描 / nuclei / 漏洞检测 / 扫一下，`run_nuclei=true`；否则 Shodan 默认只查询不扫描。
-        - Shodan 搜索无结果时系统不会自动反思重试，因此请生成尽量稳健但不过度宽泛的查询。
+        - Shodan 搜索无结果时系统最多只会做 1 轮受控自动反思重试，因此首次查询仍应尽量稳健，但不要过度宽泛。
 
         ### 🔓 核心原则 (Crucial Distinction):
         1. **Search Query**: 全员可用 `body=`, `icon_hash=` 等高级语法。
@@ -345,6 +406,79 @@ class DeepSeekHandler:
             return new_qs
         except Exception as e:
             logger.error(f"AI 修正策略生成失败: {e}")
+            return []
+
+    async def reflect_and_retry_shodan(self, user_intent: str, failed_queries: list, max_queries: int = 3) -> list:
+        """
+        Shodan 专用自动反思：
+        - 仅用于 AI 模式下的 Shodan asset_search
+        - 只生成一轮候选查询，由上层控制是否继续尝试
+        """
+        if not self.client:
+            return []
+
+        logger.ai("检测到 Shodan 查询 0 结果，AI 正在进行受控反思与修正...")
+
+        system_prompt = f"""
+        你是一个 Shodan 搜索专家。
+
+        【现状】
+        用户原始意图：{user_intent}
+        以下 Shodan 查询已经执行过，但都返回了 0 条数据：
+        {json.dumps(failed_queries, ensure_ascii=False)}
+
+        【任务】
+        请分析为什么这些 Shodan 查询没有结果，并生成最多 {max_queries} 条新的、更宽泛但仍然相关的 Shodan 查询。
+
+        【硬性规则】
+        1. 只能输出 **Shodan 查询**，绝不能输出 FOFA 语法。
+        2. 禁止使用 `app=`, `body=`, `icon_hash=`, `fid=` 这类 FOFA 字段。
+        3. 查询应优先使用 Shodan 常见方式：
+           - `product:nginx country:US`
+           - `org:"Google LLC" port:443`
+           - `hostname:example.com`
+           - `nginx country:US`
+        4. 每条修正查询必须比失败查询更宽泛，但不能完全脱离用户原意。
+        5. 不要输出解释性自然语言作为查询内容。
+
+        【建议修正策略】
+        1. 保守修正：去掉最可能过严的 1 个过滤条件（如 city、port、org）。
+        2. 中度放宽：保留核心产品/关键词，仅保留 1 个关键过滤条件（如 country）。
+        3. 宽泛兜底：保留最核心关键词，减少过滤器数量，但不要彻底改题。
+
+        请仅返回 JSON：
+        {{
+            "correction_reason": "简短说明失败原因",
+            "new_queries": ["query1", "query2", "query3"]
+        }}
+        """
+
+        try:
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": system_prompt}],
+                "temperature": 0.3
+            }
+            if "deepseek.com" in self.base_url or "openai.com" in self.base_url:
+                payload["response_format"] = {"type": "json_object"}
+
+            response = await self.client.chat.completions.create(**payload)
+            content = json.loads(re.sub(r'```json\s*|\s*```', '', response.choices[0].message.content).strip())
+
+            reason = content.get("correction_reason", "未知")
+            new_queries = normalize_shodan_retry_queries(
+                content.get("new_queries", []),
+                failed_queries=failed_queries,
+                max_queries=max_queries
+            )
+            logger.ai(f"[Shodan反思中···] {reason}" + Style.RESET_ALL)
+            if new_queries:
+                logger.ai(f"[Shodan修正中···] 已重新生成 {len(new_queries)} 条候选查询，进入单轮重试...")
+            else:
+                logger.warning("Shodan 自动反思未生成可用的候选查询。")
+            return new_queries
+        except Exception as e:
+            logger.error(f"Shodan AI 修正策略生成失败: {e}")
             return []
 
     async def generate_summary(self, results: list, user_intent: str) -> tuple:

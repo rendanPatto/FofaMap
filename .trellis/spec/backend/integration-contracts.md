@@ -45,7 +45,8 @@
 - Missing Shodan key + Shodan route -> fail fast with setup instructions; do not fall back to FOFA.
 - Shodan HTTP 401/403 -> report authentication/permission failure.
 - Shodan HTTP 429 -> report rate/quota limit; do not auto-retry in a loop.
-- Shodan search zero results -> report no data and suggest relaxing filters; do not run AI reflection.
+- Shodan AI `asset_search` zero results -> may run one controlled reflection round with at most 3 extra Shodan queries; manual `--shodan-query` does not auto-reflect.
+- Shodan API/network/config errors -> fail fast and do not trigger Shodan AI reflection.
 - User explicitly asks Shodan with FOFA DSL -> do not silently translate; ask for Shodan DSL or natural language.
 - Shodan Nuclei requested -> pass only `http://` or `https://` normalized hosts to Nuclei.
 
@@ -59,8 +60,11 @@
 
 - `normalize_ai_plan` maps legacy `fofa_search` and Shodan aliases to the normalized contract.
 - Shodan DSL extraction ignores URLs and preserves whitelisted filters.
+- Shodan retry query normalization strips noise, rejects FOFA syntax, de-duplicates, and enforces the 3-query budget.
 - Shodan key resolution prefers `settings.yaml`, then `SHODAN_API_KEY`, while placeholders allow env fallback.
 - Shodan record normalization builds HTTP(S) hosts correctly and preserves field order.
+- Shodan AI zero-result flow reflects at most once, retries candidates in order, and uses the hit query for downstream reporting.
+- Shodan manual zero-result flow and Shodan API error flow must not trigger AI reflection.
 - CLI/MCP import and Python compile checks pass without a Shodan key.
 
 ### 7. Wrong vs Correct
