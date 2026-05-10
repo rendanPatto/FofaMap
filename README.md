@@ -253,6 +253,8 @@ userinfo:
   
   # [进阶] AI 模型配置 (支持 DeepSeek/OpenAI/Ollama 等)
   deepseek_api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+  # [可选] Shodan API Key，也可通过环境变量 SHODAN_API_KEY 注入
+  shodan_api_key: "your_shodan_api_key"
   
   # 场景 A: 使用官方 DeepSeek
   api_type: "deepseek"
@@ -271,6 +273,11 @@ search:
   full: false      # 设为 true 可查询一年前的数据
   start_page: 1
   end_page: 5      # 自动爬取前 5 页
+
+# ====== Shodan 设置 (Shodan Settings) ======
+shodan:
+  default_limit: 100  # Shodan 默认返回数量
+  timeout: 30         # Shodan API 请求超时时间（秒）
 
 # ====== 性能与输出 (System) ======
 system:
@@ -451,7 +458,34 @@ python3 fofamap.py -hq 8.8.8.8
 ```
 <img alt="image" src="https://github.com/user-attachments/assets/32a44671-f552-4a8f-a501-807006133923" />
 
-## 4️⃣ 统计聚合（AI 态势解读）
+## 4️⃣ Shodan 智能侦察与手动查询
+当 AI 模式中明确出现 `shodan` 时，FofaMap 会切换到 Shodan 数据源；未提到 Shodan 时默认仍使用 FOFA。
+
+```bash
+# AI 自然语言生成 Shodan DSL
+python3 fofamap.py -ai "使用 shodan 查一下美国的 nginx"
+
+# AI 模式保留用户原生 Shodan DSL
+python3 fofamap.py -ai "使用 shodan 搜索 product:nginx country:US"
+
+# Shodan 单 IP 画像
+python3 fofamap.py -ai "用 shodan 看看 8.8.8.8"
+```
+
+也可以直接使用手动参数，便于调试和自动化：
+
+```bash
+python3 fofamap.py --shodan-query 'product:nginx country:US' --shodan-limit 100
+python3 fofamap.py --shodan-host 8.8.8.8
+```
+
+说明：
++ Shodan API Key 可写入 `config/settings.yaml` 的 `userinfo.shodan_api_key`，也可使用环境变量 `SHODAN_API_KEY`。
++ Shodan 搜索结果导出字段为：`engine, host, ip, port, protocol, title, domain, country, city, org, product, version, os, timestamp`。
++ Shodan Host 画像中的 CVE 摘要来自 Shodan 情报，未做本地验证。
++ 只有用户明确要求“扫描 / nuclei / 漏洞检测 / 扫一下”时，Shodan 结果才会筛选 HTTP(S) 目标联动 Nuclei。
+
+## 5️⃣ 统计聚合（AI 态势解读）
 使用统计聚合功能，可以根据当前的查询内容，生成全球统计信息，当前可统计每个字段的前5排名。例如，我们使用下列命令统计全球范围内使用Redis应用的Top5国家。其中-cq为查询内容，-f为需要统计聚合的字段，默认为title，可按照示例配置多个字段 fields=country,protocol,domain,port。详细用法见FOFA API 官方文档
 ```bash
 python3 fofamap.py -cq 'app="redis"' -f country,org
@@ -460,7 +494,7 @@ python3 fofamap.py -cq 'app="redis"' -f country,org
 
 ---
 
-## 5️⃣ 图标 Hash 查询
+## 6️⃣ 图标 Hash 查询
 用户可通过填入任意一网站地址，Fofamap会自动获取该网站的favicon.ico图标文件，并计算其hash值，并去查找使用相同favicon.ico图标文件的网站。
 ```bash
 python3 fofamap.py -ico https://www.bing.com
@@ -469,7 +503,7 @@ python3 fofamap.py -ico https://www.bing.com
 
 ---
 
-## 6️⃣ 批量查询
+## 7️⃣ 批量查询
 用户可新建一个记事本文件，如targets.txt，然后将准备查询的fofa语句写入其中，运行以下命令即可进行批量查询。
 ```bash
 python3 fofamap.py -bq targets.txt
@@ -483,7 +517,7 @@ icp="京ICP备10036305号"
 ```
 <img  alt="image" src="https://github.com/user-attachments/assets/67b3057b-e9eb-48cb-9f91-fb4aa2e408fb" />
 
-## 7️⃣ 过滤查询
+## 8️⃣ 过滤查询
 | **特性**     | **-i (--include)**       | **-k (--key_word)**                  |
 | ------------ | ------------------------ | ------------------------------------ |
 | **筛选逻辑** | **过滤 (Filter)**        | **搜索 (Search)**                    |
@@ -499,7 +533,7 @@ python3 fofamap.py -q 'domain="baidu.com"' -i "200" -k "文心,旅游"
 ```
 <img width="1470" height="655" alt="image" src="https://github.com/user-attachments/assets/709eb99e-b942-42ff-8eb7-3167230aeab3" />
 
-## 8️⃣ 自定义导出格式与导出路径
+## 9️⃣ 自定义导出格式与导出路径
 默认导出格式由 `config/settings.yaml` 中的 `system.export_format` 控制，也可以在命令行临时覆盖。
 
 导出为 CSV：
@@ -572,6 +606,15 @@ Cursor 对 MCP 的支持非常完善，配置好后，你可以直接在 Compose
 “帮我查一下 baidu.com 的资产信息，并检查是否有存活。” 
 
 Cursor 会自动分析意图，并在界面上显示 `Using tool: search_assets...`。
+
+MCP 也提供独立 Shodan 工具：
+
+```text
+shodan_search_assets(query="product:nginx country:US", limit=50)
+shodan_host_profile(ip="8.8.8.8")
+```
+
+这些工具返回 Markdown 表格/摘要；其中 CVE 信息仅代表 Shodan 情报，未做本地验证。
 
 <!-- 这是一张图片，ocr 内容为： -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/12839102/1767953662133-8e369f5a-3d4b-499d-aed0-74094190fe0d.png)
